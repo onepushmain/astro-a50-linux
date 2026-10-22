@@ -214,6 +214,17 @@ column the device slots; right panel five vertical sliders labeled about
 95 / 419 / 783 / 3499 / 6100 Hz with an ADVANCED SETTINGS expander;
 REVERT and SAVE under the slots.
 
+## Approved look
+
+The user liked the clickable mockup at
+https://claude.ai/artifact/5eCyX5ptRQ6pQiSvhXn9KK (private to the user). Build
+to it: the header with battery bars and status, the device row with
+Clear/Sync and an unsynced-changes count, four tabs, EQ as three panels
+(library / on-headset slots / 5-band editor with Advanced), a "● changed"
+marker, Barlow + Barlow Condensed fonts, accent `#ff7a4d` on `#0e0e0f` /
+`#1a1a1c`. Its EQ curves and noise-gate descriptions are samples, not device
+facts.
+
 ## Left to the builder
 
 - File layout, module split (under the 20000-byte limit), naming.
