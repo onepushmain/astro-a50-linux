@@ -188,7 +188,10 @@ as active. Sync maps to `0x61`.
   as stale bytes in the probe). Rejected before sending. The fake A50 enforces
   the same limit.
 - **Closing with unsynced changes**: the window warns and offers to "revert
-  and close", "keep live and close", or "cancel". On disconnect, it shows a
+  and close", "keep live and close", or "cancel". *As built:* a page can't
+  put custom choices in the close prompt, so closing shows Chromium's
+  "Leave site?" (keep live / cancel), and a **Revert & close** button
+  appears next to Clear/Sync while there are unsynced changes. On disconnect, it shows a
   banner and drops the pending state, because the device's active values are
   then whatever the device has.
 

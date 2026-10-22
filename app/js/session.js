@@ -74,9 +74,15 @@ export class Session {
   }
 
   async readStatus() {
-    this.battery = await this.a50.getBattery();
-    this.headset = await this.a50.getHeadsetStatus();
-    this.activeSlot = await this.a50.getActiveSlot();
+    try {
+      this.battery = await this.a50.getBattery();
+      this.headset = await this.a50.getHeadsetStatus();
+      this.activeSlot = await this.a50.getActiveSlot();
+    } catch (e) {
+      if (!(e instanceof HeadsetNotConnected)) throw e;
+      this.battery = null;
+      this.headset = { on: false, docked: false };
+    }
   }
 
   // Battery, power/dock state and the active slot change on the headset itself.
@@ -95,26 +101,35 @@ export class Session {
   fieldChanged(f) { return this.current[f] !== this.saved[f]; }
 
   // Sends only the parts of a slot that differ from what the device has now.
+  // Only those parts are checked: a value the device already holds stays as
+  // it is, even if it is outside what this app would write. Everything is
+  // checked before the first write, so a bad preset sends nothing.
   async writeSlot(slot, target) {
     const have = this.current.slots[slot - 1];
-    checkName(target.name);
-    checkGains(target.gains);
-    target.bands.forEach((b, i) => checkFreqBw(i + 1, b.freq, b.bw));
+    const ops = [];
     if (target.name !== have.name) {
-      await this.a50.setName(slot, target.name);
-      have.name = target.name;
+      checkName(target.name);
+      ops.push(async () => {
+        await this.a50.setName(slot, target.name);
+        have.name = target.name;
+      });
     }
     if (!same(target.gains, have.gains)) {
-      await this.a50.setGain(slot, target.gains);
-      have.gains = [...target.gains];
+      checkGains(target.gains);
+      ops.push(async () => {
+        await this.a50.setGain(slot, target.gains);
+        have.gains = [...target.gains];
+      });
     }
-    for (let i = 0; i < 5; i++) {
-      const b = target.bands[i];
-      if (b.freq !== have.bands[i].freq || b.bw !== have.bands[i].bw) {
+    target.bands.forEach((b, i) => {
+      if (b.freq === have.bands[i].freq && b.bw === have.bands[i].bw) return;
+      checkFreqBw(i + 1, b.freq, b.bw);
+      ops.push(async () => {
         await this.a50.setFreqBw(slot, i + 1, b.freq, b.bw);
         have.bands[i] = { freq: b.freq, bw: b.bw };
-      }
-    }
+      });
+    });
+    for (const op of ops) await op();
   }
 
   editSlot(slot, change) {
@@ -126,7 +141,9 @@ export class Session {
   }
 
   setGain(slot, band, db) { return this.editSlot(slot, (t) => { t.gains[band] = db; }); }
-  setBand(slot, band, freq, bw) { return this.editSlot(slot, (t) => { t.bands[band] = { freq, bw }; }); }
+  // Frequency and width are set separately, each keeping the other's latest value.
+  setBandFreq(slot, band, freq) { return this.editSlot(slot, (t) => { t.bands[band].freq = freq; }); }
+  setBandWidth(slot, band, bw) { return this.editSlot(slot, (t) => { t.bands[band].bw = bw; }); }
   setName(slot, name) { return this.editSlot(slot, (t) => { t.name = name; }); }
 
   loadPreset(slot, preset) {

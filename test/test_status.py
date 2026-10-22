@@ -8,6 +8,7 @@ import pathlib
 import socket
 import tempfile
 import threading
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -126,11 +127,23 @@ class OutputTests(unittest.TestCase):
         json.loads(line)
 
 
+# The real A50 report descriptor (vendor page 0xFF32, report ID 2, 63 bytes in/out).
+A50_DESCRIPTOR = bytes.fromhex(
+    "0632ff0974a101a10385027508150026ff00953f097581027508150026ff00953f09769102c0c0")
+
+
 class FindDeviceTests(unittest.TestCase):
-    def make(self, root, name, hid_id):
+    def make(self, root, name, hid_id, descriptor=A50_DESCRIPTOR):
         d = pathlib.Path(root, "class", "hidraw", name, "device")
         d.mkdir(parents=True)
         (d / "uevent").write_text(f"DRIVER=hid-generic\nHID_ID={hid_id}\nHID_NAME=x\n")
+        (d / "report_descriptor").write_bytes(descriptor)
+
+    def test_skips_an_a50_interface_that_is_not_the_control_interface(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.make(root, "hidraw1", "0003:00009886:0000002C", descriptor=bytes.fromhex("050c0901a101c0"))
+            self.make(root, "hidraw2", "0003:00009886:0000002C")
+            self.assertEqual(st.find_hidraw(root), "/dev/hidraw2")
 
     def test_finds_the_a50_among_other_hid_devices(self):
         with tempfile.TemporaryDirectory() as root:
@@ -157,6 +170,35 @@ class AppRunningTests(unittest.TestCase):
             self.assertFalse(st.app_running(run))
             pathlib.Path(run, "app.pid").write_text("garbage")
             self.assertFalse(st.app_running(run))
+
+
+class LockTests(unittest.TestCase):
+    def test_while_the_app_holds_the_lock_the_cached_value_is_shown_without_touching_the_device(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as run:
+            pathlib.Path(run, "app.pid").write_text(str(os.getpid()))
+            pathlib.Path(run, "last.json").write_text(json.dumps(st.waybar(None, "off")))
+            with open(pathlib.Path(run, "status.lock"), "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                touched = []
+                original = st.find_hidraw
+                st.find_hidraw = lambda *a: touched.append(1)
+                try:
+                    out = st.run(pathlib.Path(run), wait=0.2)
+                finally:
+                    st.find_hidraw = original
+        self.assertEqual(touched, [])
+        self.assertIn("A50 Control is open", out["tooltip"])
+
+    def test_a_lock_held_by_something_dead_or_stuck_gives_up_instead_of_hanging(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as run:
+            with open(pathlib.Path(run, "status.lock"), "w") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                start = time.monotonic()
+                out = st.run(pathlib.Path(run), wait=0.3)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(out["class"], ["busy"])
 
 
 if __name__ == "__main__":

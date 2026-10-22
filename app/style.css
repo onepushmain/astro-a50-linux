@@ -23,6 +23,8 @@ button, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: 0.5; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: var(--accent); }
+a:hover { color: var(--warn); }
 h1, h2 { font-family: var(--head); font-weight: 600; letter-spacing: 0.1em; margin: 0; }
 h2 { font-size: 18px; }
 .boot { padding: 32px; color: var(--muted); }

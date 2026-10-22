@@ -38,39 +38,41 @@ function battery(b) {
 }
 
 function top(s, demo) {
-  return `<header class="top">${brand()}<div class="status">${demo ? '<span>DEMO · fake headset</span>' : ''}` +
+  return `<header class="top">${brand()}<div class="status">${demo ? '<span>DEMO · fake headset · <a href="./">Leave demo</a></span>' : ''}` +
     `<span>${esc(headsetText(s.headset))}</span>${battery(s.battery)}</div></header>`;
 }
 
-function device(s) {
+function device(s, busy) {
   const n = s.changeCount();
+  const off = n && !busy ? '' : ' disabled';
   return `<section class="device"><div class="device-id">${HEADSET}<div><h1>ASTRO A50 · GEN 4</h1>` +
     `<div class="fw">HEADSET FW ${esc(s.info.headsetFw ?? '— (turn the headset on)')}<br>BASE STATION FW ${esc(s.info.baseFw ?? '—')}</div></div></div>` +
     '<div class="actions">' +
     (n ? `<span class="pending">${n} unsynced change${n === 1 ? '' : 's'}</span>` : '') +
-    `<button type="button" class="btn" data-action="clear"${n ? '' : ' disabled'}>CLEAR CHANGES</button>` +
-    `<button type="button" class="btn${n ? ' primary' : ''}" data-action="sync"${n ? '' : ' disabled'}>SYNC TO DEVICE</button>` +
+    (n ? `<button type="button" id="btn-revert-close" class="btn" data-action="revert-close"${off} title="Put back the saved settings, then close the window">REVERT &amp; CLOSE</button>` : '') +
+    `<button type="button" id="btn-clear" class="btn" data-action="clear"${off}>CLEAR CHANGES</button>` +
+    `<button type="button" id="btn-sync" class="btn${n ? ' primary' : ''}" data-action="sync"${off}>SYNC TO DEVICE</button>` +
     '</div></section>';
 }
 
 function tabs(view) {
   return '<nav class="tabs" role="tablist" aria-label="Sections">' + TABS.map(([id, label]) =>
-    `<button type="button" role="tab" data-action="tab" data-value="${id}" aria-selected="${view.tab === id}">${label}</button>`).join('') + '</nav>';
+    `<button type="button" role="tab" id="tab-${id}" aria-controls="tabpanel" aria-selected="${view.tab === id}" tabindex="${view.tab === id ? 0 : -1}" data-action="tab" data-value="${id}">${label}</button>`).join('') + '</nav>';
 }
 
 function libraryPanel(state) {
   const { view, library } = state;
   const rows = library.length ? library.map((p, i) =>
-    `<div class="lib-row${view.lib === i ? ' sel' : ''}"><button type="button" data-action="lib-pick" data-value="${i}" ${pressed(view.lib === i)}>${esc(p.name)}</button>` +
-    `<button type="button" class="icon-btn bare" data-action="lib-remove" data-value="${i}" aria-label="Delete ${esc(p.name)}">✕</button></div>`).join('')
+    `<div class="lib-row${view.lib === i ? ' sel' : ''}"><button type="button" id="lib-pick-${i}" data-action="lib-pick" data-value="${i}" ${pressed(view.lib === i)}>${esc(p.name)}</button>` +
+    `<button type="button" id="lib-remove-${i}" class="icon-btn bare" data-action="lib-remove" data-value="${i}" aria-label="Delete ${esc(p.name)}">✕</button></div>`).join('')
     : '<div class="empty">No presets yet. Save a slot to start your library.</div>';
   const picked = library[view.lib];
   return '<div class="panel"><div class="panel-head"><h2>PRESET LIBRARY</h2>' +
-    `<button type="button" class="icon-btn" data-action="lib-add" aria-label="Save EQ 0${view.sel} to the library">+</button></div>${rows}` +
-    `<button type="button" class="btn wide" data-action="lib-load" style="margin-top:16px"${picked ? '' : ' disabled'}>` +
+    `<button type="button" id="lib-add" class="icon-btn" data-action="lib-add" aria-label="Save EQ 0${view.sel} to the library">+</button></div>${rows}` +
+    `<button type="button" id="lib-load" class="btn wide" data-action="lib-load" style="margin-top:16px"${picked ? '' : ' disabled'}>` +
     `${picked ? `LOAD ${esc(picked.name)} INTO EQ 0${view.sel}` : 'PICK A PRESET TO LOAD'}</button>` +
-    '<div class="lib-tools"><button type="button" class="btn" data-action="lib-export">EXPORT</button>' +
-    '<button type="button" class="btn" data-action="lib-import">IMPORT</button></div></div>';
+    '<div class="lib-tools"><button type="button" id="lib-export" class="btn" data-action="lib-export">EXPORT</button>' +
+    '<button type="button" id="lib-import" class="btn" data-action="lib-import">IMPORT</button></div></div>';
 }
 
 function slotsPanel(s, view) {
@@ -78,8 +80,8 @@ function slotsPanel(s, view) {
     const n = i + 1;
     const active = s.activeSlot === n;
     return `<div class="slot${view.sel === n ? ' sel' : ''}">` +
-      `<button type="button" class="dot" data-action="activate" data-slot="${n}" ${pressed(active)} aria-label="Listen to EQ 0${n}"><span></span></button>` +
-      `<button type="button" class="pick" data-action="select" data-slot="${n}"><small>EQ 0${n}${active ? ' · ACTIVE' : ''}</small><span>${esc(slot.name)}</span></button>` +
+      `<button type="button" id="slot-dot-${n}" class="dot" data-action="activate" data-slot="${n}" ${pressed(active)} aria-label="Listen to EQ 0${n}"><span></span></button>` +
+      `<button type="button" id="slot-pick-${n}" class="pick" data-action="select" data-slot="${n}"><small>EQ 0${n}${active ? ' · ACTIVE' : ''}</small><span>${esc(slot.name)}</span></button>` +
       `${changedMark(s.slotChanged(n))}</div>`;
   }).join('');
   return `<div class="panel"><div class="panel-head"><h2>ON HEADSET</h2></div>${rows}` +
@@ -105,10 +107,10 @@ function editorPanel(s, view) {
     `<input id="slot-name" maxlength="${MAX_NAME}" value="${esc(slot.name)}" data-input="name" spellcheck="false" autocomplete="off"></div>` +
     `<span class="note">${live ? 'You are hearing this slot live' : 'Not the active slot: you hear edits once you switch to it'}</span></div>` +
     `<div class="bands">${bands}</div>` +
-    `<button type="button" class="expander" data-action="advanced" aria-expanded="${view.adv}">${view.adv ? '▾' : '▸'} ADVANCED SETTINGS</button>${adv}` +
+    `<button type="button" id="advanced-toggle" class="expander" data-action="advanced" aria-expanded="${view.adv}">${view.adv ? '▾' : '▸'} ADVANCED SETTINGS</button>${adv}` +
     '<div class="editor-actions">' +
-    `<button type="button" class="btn" data-action="revert"${s.slotChanged(view.sel) ? '' : ' disabled'}>REVERT</button>` +
-    '<button type="button" class="btn" data-action="lib-add">SAVE TO LIBRARY</button></div></div>';
+    `<button type="button" id="btn-revert" class="btn" data-action="revert"${s.slotChanged(view.sel) ? '' : ' disabled'}>REVERT</button>` +
+    '<button type="button" id="lib-add-editor" class="btn" data-action="lib-add">SAVE TO LIBRARY</button></div></div>';
 }
 
 function slider(id, k, label, value, changed, help, vertical = false) {
@@ -125,9 +127,9 @@ function slider(id, k, label, value, changed, help, vertical = false) {
 function micTab(s) {
   const c = s.current;
   const gates = GATES.map((g, i) =>
-    `<button type="button" class="choice" data-action="gate" data-value="${i}" ${pressed(c.gate === i)}><b>${g}</b></button>`).join('');
+    `<button type="button" id="gate-${i}" class="choice" data-action="gate" data-value="${i}" ${pressed(c.gate === i)}><b>${g}</b></button>`).join('');
   const eqs = [0, 1, 2].map((m) =>
-    `<button type="button" class="choice" data-action="mic-eq" data-value="${m}" ${pressed(c.micEq === m)}><b>PRESET ${m + 1}</b></button>`).join('');
+    `<button type="button" id="mic-eq-${m}" class="choice" data-action="mic-eq" data-value="${m}" ${pressed(c.micEq === m)}><b>PRESET ${m + 1}</b></button>`).join('');
   return '<div class="row"><div class="panel half">' +
     slider('slider-4', 4, 'MIC LEVEL', c.sliders[4], s.sliderChanged(4), 'How loud you are to others.') +
     slider('slider-5', 5, 'SIDETONE', c.sliders[5], s.sliderChanged(5), 'How much of your own voice you hear.') +
@@ -162,8 +164,8 @@ function settingsTab(s) {
 
 function banner(b) {
   if (!b) return '';
-  const action = b.action ? `<button type="button" class="btn" data-action="${esc(b.action)}">${esc(b.actionLabel)}</button>` : '';
-  return `<div class="banner${b.kind === 'error' ? ' error' : ''}" role="alert"><span>${esc(b.text)}</span>${action}</div>`;
+  return `<div class="banner${b.kind === 'error' ? ' error' : ''}" role="${b.kind === 'error' ? 'alert' : 'status'}"><span>${esc(b.text)}</span>` +
+    '<button type="button" id="banner-dismiss" class="icon-btn bare" data-action="dismiss" aria-label="Dismiss">✕</button></div>';
 }
 
 function centerCard(title, body) {
@@ -178,14 +180,19 @@ export function render(state) {
       return centerCard('Connect your base station', banner(state.banner) +
         '<ul><li>Plug the A50 base station in with USB.</li>' +
         '<li>The <code>astro-a50</code> package installs a udev rule so you don\'t need root. Re-plug the base station once after installing.</li></ul>' +
-        '<button type="button" class="btn primary" data-action="connect">CONNECT</button>' +
+        '<button type="button" id="btn-connect" class="btn primary" data-action="connect">CONNECT</button>' +
         '<p class="note">No headset here? <a href="?demo">Try the demo</a> with a fake one.</p>');
     case 'loading':
       return centerCard('Reading your headset…', '<p class="note">This takes a few seconds.</p>');
     case 'headset-off':
       return centerCard('Turn the headset on', banner(state.banner) +
         '<p class="note">The base station is connected, but the headset is off and not docked. Turn it on or dock it.</p>' +
-        '<button type="button" class="btn primary" data-action="retry">TRY AGAIN</button>');
+        '<button type="button" id="btn-retry" class="btn primary" data-action="retry">TRY AGAIN</button>');
+    case 'other-window':
+      return centerCard('A50 Control is already open', '<p class="note">It is already open in another window. Only one window talks to the headset at a time, so use that one.</p>');
+    case 'replug':
+      return centerCard('Re-plug the base station', '<p class="note">The base station stopped answering. Unplug the base station\'s USB cable, wait a moment and plug it back in. The app reconnects by itself.</p>' +
+        '<p class="note">Still stuck after that? Reset the headset by holding the Game and Dolby buttons together for 15 seconds.</p>');
     default: {
       const s = state.session;
       const view = state.view;
@@ -194,7 +201,8 @@ export function render(state) {
       else if (view.tab === 'stream') body = streamTab(s);
       else if (view.tab === 'settings') body = settingsTab(s);
       else body = `<div class="row">${libraryPanel(state)}${slotsPanel(s, view)}${editorPanel(s, view)}</div>`;
-      return top(s, state.demo) + banner(state.banner) + device(s) + tabs(view) + `<main>${body}</main>`;
+      return top(s, state.demo) + banner(state.banner) + device(s, state.busy) + tabs(view) +
+        `<main id="tabpanel" role="tabpanel" aria-labelledby="tab-${view.tab}">${body}</main>`;
     }
   }
 }

@@ -122,3 +122,38 @@ test('listeners hear about every change', async () => {
   await session.setDefaultBalance(10);
   assert.ok(calls >= 2);
 });
+
+test('a value on the device outside the app limits does not lock the slot', async () => {
+  const { fake, session } = await open();
+  // A 12-character name stored by other software, in the active and saved copies.
+  const name = [...'A50 MOD KIT2'].map((c) => c.charCodeAt(0)).concat(0);
+  name.forEach((b, i) => { fake.active.names[0][i] = b; fake.saved.names[0][i] = b; });
+  await session.load();
+  await session.setGain(1, 0, 3);
+  assert.deepEqual(fake.active.gains[0].slice(0, 1), [3]);
+  await session.clearChanges();
+  assert.equal(session.changeCount(), 0);
+});
+
+test('a bad value in a preset is refused before anything is sent', async () => {
+  const { fake, session } = await open();
+  const bands = session.current.slots[0].bands.map((b) => ({ ...b }));
+  bands[0] = { freq: 95, bw: 4096 }; // shelf band with a width
+  await assert.rejects(session.loadPreset(1, { name: 'X', gains: [1, 1, 1, 1, 1], bands }), RangeError);
+  assert.equal(fake.log.length, 0);
+});
+
+test('frequency then width edits in a row keep both', async () => {
+  const { fake, session } = await open();
+  await Promise.all([session.setBandFreq(1, 2, 1000), session.setBandWidth(1, 2, 8192)]);
+  assert.deepEqual(fake.active.bands[0][2], { freq: 1000, bw: 8192 });
+});
+
+test('a status poll while the headset is off shows it as off instead of failing', async () => {
+  const { fake, session } = await open();
+  fake.headsetOn = false;
+  fake.failNext = 'HID_ERROR_SLAVE_NO_SLAVE';
+  await session.refreshStatus();
+  assert.equal(session.battery, null);
+  assert.deepEqual(session.headset, { on: false, docked: false });
+});
