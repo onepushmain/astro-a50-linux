@@ -124,3 +124,45 @@ test('error replies surface as RequestFailed', async () => {
   await assert.rejects(a50.getBattery(), (e) => e instanceof RequestFailed && e.message === 'SOMETHING_BAD');
   assert.deepEqual(await a50.getBattery(), { percent: 88, charging: false });
 });
+
+test('short replies are protocol errors, not undefined values', async () => {
+  for (const [type, call] of [
+    [Cmd.GET_SLIDER_VALUE, (a) => a.getSlider(Slider.MIC)],
+    [Cmd.GET_NOISE_GATE_MODE, (a) => a.getNoiseGate()],
+    [Cmd.GET_BALANCE, (a) => a.getBalance()],
+    [Cmd.GET_DEFAULT_BALANCE, (a) => a.getDefaultBalance()],
+    [Cmd.GET_BASE_FIRMWARE_MINOR, (a) => a.getBaseFirmware()],
+    [Cmd.GET_HEADSET_FIRMWARE_MINOR, (a) => a.getHeadsetFirmware()],
+  ]) {
+    const { fake, a50 } = connect();
+    fake.corrupt = (t, data) => (t === type ? data.slice(0, data.length === 1 ? 0 : 2) : data);
+    await assert.rejects(call(a50), /short|echo/, `0x${type.toString(16)}`);
+  }
+});
+
+test('a send that never settles still times out and frees nothing stale', async () => {
+  const transport = { send: () => new Promise(() => {}), onInput: () => {} };
+  const a50 = new A50(transport, { timeoutMs: 20 });
+  await assert.rejects(a50.getBattery(), DeviceTimeout);
+});
+
+test('a send that fails rejects the request and later replies are not mistaken for it', async () => {
+  const fake = new FakeA50();
+  let fail = true;
+  const transport = {
+    send: (r) => (fail ? Promise.reject(new Error('write failed')) : fake.transport.send(r)),
+    onInput: fake.transport.onInput,
+  };
+  const a50 = new A50(transport);
+  await assert.rejects(a50.getBattery(), /write failed/);
+  assert.equal(a50.pending, null);
+  fail = false;
+  assert.deepEqual(await a50.getBattery(), { percent: 88, charging: false });
+});
+
+test('close stops listening and refuses further requests', async () => {
+  const { fake, a50 } = connect();
+  a50.close();
+  await assert.rejects(a50.getBattery(), /closed/);
+  assert.equal(fake.log.length, 0);
+});

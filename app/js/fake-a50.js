@@ -58,7 +58,10 @@ export class FakeA50 {
     this.listeners = [];
     this.transport = {
       send: async (report) => this.receive(report),
-      onInput: (cb) => { this.listeners.push(cb); },
+      onInput: (cb) => {
+        this.listeners.push(cb);
+        return () => { this.listeners = this.listeners.filter((l) => l !== cb); };
+      },
     };
   }
 

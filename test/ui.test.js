@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { A50 } from '../app/js/device.js';
 import { FakeA50 } from '../app/js/fake-a50.js';
 import { Session } from '../app/js/session.js';
-import { render } from '../app/js/ui.js';
+import { render, renderBanner } from '../app/js/ui.js';
 
 async function mainView(view = {}, opts) {
   const fake = new FakeA50(opts);
@@ -86,10 +86,88 @@ test('the connect screen explains setup and offers the demo', () => {
 test('a banner is shown above the main screen', async () => {
   const { state } = await mainView();
   state.banner = { kind: 'error', text: 'Base station disconnected' };
-  assert.match(render(state), /class="banner error"[^]*Base station disconnected/);
+  assert.match(renderBanner(state), /class="banner error" role="alert"[^]*Base station disconnected/);
+  assert.doesNotMatch(render(state), /class="banner/);
 });
 
 test('low battery gets the low class', async () => {
   const { state } = await mainView({}, { battery: 12 });
   assert.match(render(state), /class="battery low"/);
+});
+
+test('a second window explains that the app is already open', () => {
+  assert.match(render({ screen: 'other-window' }), /already open in another window/i);
+});
+
+test('after a timeout the page asks for a re-plug and offers no connect button', () => {
+  const html = render({ screen: 'replug' });
+  assert.match(html, /unplug the base station/i);
+  assert.doesNotMatch(html, /data-action="connect"/);
+});
+
+test('banners can be dismissed', async () => {
+  const { state } = await mainView();
+  state.banner = { kind: 'info', text: 'Saved to the headset.' };
+  assert.match(renderBanner(state), /data-action="dismiss"[^>]*aria-label="Dismiss"/);
+  assert.equal(renderBanner({ banner: null }), '');
+});
+
+test('with unsynced changes there is a revert-and-close button', async () => {
+  const { state, session } = await mainView();
+  assert.doesNotMatch(render(state), /data-action="revert-close"/);
+  await session.setGain(1, 0, 4);
+  assert.match(render(state), /data-action="revert-close"/);
+});
+
+test('while a device action runs, sync and clear are disabled', async () => {
+  const { state, session } = await mainView();
+  await session.setGain(1, 0, 4);
+  state.busy = true;
+  const html = render(state);
+  for (const action of ['sync', 'clear', 'activate', 'revert', 'lib-load']) {
+    assert.match(html, new RegExp(`data-action="${action}"[^>]*aria-disabled="true"`), action);
+  }
+  assert.match(html, /<main id="tabpanel"[^>]*aria-busy="true"/);
+  state.view.tab = 'mic';
+  const mic = render(state);
+  for (const action of ['gate', 'mic-eq']) {
+    assert.match(mic, new RegExp(`data-action="${action}"[^>]*aria-disabled="true"`), action);
+  }
+});
+
+test('tabs are proper tabs with a labelled panel and roving tabindex', async () => {
+  const { state } = await mainView({ tab: 'mic' });
+  const html = render(state);
+  assert.match(html, /role="tab" id="tab-mic" aria-controls="tabpanel" aria-selected="true" tabindex="0"/);
+  assert.match(html, /role="tab" id="tab-eq" aria-controls="tabpanel" aria-selected="false" tabindex="-1"/);
+  assert.match(html, /<main id="tabpanel" role="tabpanel" aria-labelledby="tab-mic"/);
+});
+
+test('every button that changes the device has an id, so focus can be restored', async () => {
+  const { state } = await mainView();
+  const html = render(state);
+  const buttons = html.match(/<button[^>]*>/g);
+  for (const b of buttons) assert.match(b, / id="/, b);
+});
+
+test('demo mode has a way back to the real headset', async () => {
+  const { state } = await mainView();
+  state.demo = true;
+  assert.match(render(state), /<a href="\.\/">Leave demo<\/a>/);
+});
+
+test('when the headset turns off, battery disappears and status says so', async () => {
+  const { state, session } = await mainView();
+  session.battery = null;
+  session.headset = { on: false, docked: false };
+  const html = render(state);
+  assert.match(html, /Headset off/);
+  assert.doesNotMatch(html, /class="battery/);
+});
+
+test('unavailable buttons stay focusable (aria-disabled), so focus is not lost', async () => {
+  const { state } = await mainView();
+  const html = render(state);
+  assert.match(html, /id="btn-sync"[^>]*aria-disabled="true"/);
+  assert.doesNotMatch(html, /<button[^>]* disabled[ >]/);
 });

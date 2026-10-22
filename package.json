@@ -5,6 +5,6 @@
   "description": "Linux control app for the Astro A50 gen 4 headset",
   "license": "MIT",
   "scripts": {
-    "test": "node --test test/"
+    "test": "make test"
   }
 }

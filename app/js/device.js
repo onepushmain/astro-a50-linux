@@ -22,6 +22,11 @@ function echo(data, ...expected) {
   }
 }
 
+function atLeast(data, n) {
+  if (data.length < n) throw new ProtocolError('short reply');
+  return data;
+}
+
 function checkInt(value, lo, hi, what) {
   if (!Number.isInteger(value) || value < lo || value > hi) throw new RangeError(`${what} must be ${lo}-${hi}`);
 }
@@ -33,12 +38,20 @@ export class A50 {
     this.queue = Promise.resolve();
     this.pending = null;
     this.dead = null;
-    transport.onInput((report) => {
+    this.unlisten = transport.onInput((report) => {
       const waiter = this.pending;
       if (!waiter) return; // unsolicited report: ignore
       this.pending = null;
       waiter(report);
     });
+  }
+
+  // Stops listening for replies; any later request is refused.
+  close() {
+    if (typeof this.unlisten === 'function') this.unlisten();
+    this.unlisten = null;
+    this.pending = null;
+    this.dead ??= new Error('device closed');
   }
 
   // One request at a time: replies carry no request id, so the next reply
@@ -57,10 +70,13 @@ export class A50 {
         }, this.timeoutMs);
       });
       try {
-        await this.transport.send(bytes);
-        return decodeResponse(await reply);
+        // The timer covers the write too, so a send that never settles
+        // still ends the request.
+        const [, report] = await Promise.all([this.transport.send(bytes), reply]);
+        return decodeResponse(report);
       } finally {
         clearTimeout(timer);
+        this.pending = null;
       }
     };
     const result = this.queue.then(run, run);
@@ -77,18 +93,18 @@ export class A50 {
   async getBaseFirmware() {
     const info = parseImageHeader(await this.request(Cmd.GET_DEVICE_INFO));
     if (info.fwMajor === null) throw new ProtocolError('short device info reply');
-    const minor = await this.request(Cmd.GET_BASE_FIRMWARE_MINOR);
+    const minor = atLeast(await this.request(Cmd.GET_BASE_FIRMWARE_MINOR), 1);
     return `${info.fwMajor}.${minor[0]}`;
   }
 
   async getHeadsetFirmware() {
     const major = parseU32(await this.request(Cmd.GET_HEADSET_FIRMWARE_MAJOR, [0x0a]));
-    const minor = await this.request(Cmd.GET_HEADSET_FIRMWARE_MINOR, [0x0a]);
+    const minor = atLeast(await this.request(Cmd.GET_HEADSET_FIRMWARE_MINOR, [0x0a]), 1);
     return `${major}.${minor[0]}`;
   }
 
   async getActiveSlot() {
-    const data = await this.request(Cmd.GET_ACTIVE_EQ_PRESET);
+    const data = atLeast(await this.request(Cmd.GET_ACTIVE_EQ_PRESET), 1);
     checkSlot(data[0]);
     return data[0];
   }
@@ -130,7 +146,7 @@ export class A50 {
 
   async getSlider(slider) {
     checkInt(slider, Slider.STREAM_MIC, Slider.SIDETONE, 'slider');
-    const data = await this.request(Cmd.GET_SLIDER_VALUE, [slider]);
+    const data = atLeast(await this.request(Cmd.GET_SLIDER_VALUE, [slider]), 4);
     echo(data, Cmd.GET_SLIDER_VALUE, slider);
     return { value: data[2], saved: data[3] };
   }
@@ -142,7 +158,7 @@ export class A50 {
   }
 
   async getNoiseGate() {
-    const data = await this.request(Cmd.GET_NOISE_GATE_MODE);
+    const data = atLeast(await this.request(Cmd.GET_NOISE_GATE_MODE), 3);
     echo(data, Cmd.GET_NOISE_GATE_MODE);
     return { value: data[1], saved: data[2] };
   }
@@ -154,7 +170,7 @@ export class A50 {
   }
 
   async getMicEq(saved = false) {
-    const data = await this.request(Cmd.GET_MIC_EQ, [saved ? 1 : 0]);
+    const data = atLeast(await this.request(Cmd.GET_MIC_EQ, [saved ? 1 : 0]), 1);
     if (!MIC_EQS.includes(data[0])) throw new ProtocolError(`unknown mic EQ ${data[0]}`);
     return data[0];
   }
@@ -165,10 +181,10 @@ export class A50 {
   }
 
   // Balance: 0 = all game .. 255 = all chat.
-  async getBalance() { return (await this.request(Cmd.GET_BALANCE))[0]; }
+  async getBalance() { return atLeast(await this.request(Cmd.GET_BALANCE), 1)[0]; }
 
   async getDefaultBalance(saved = false) {
-    return (await this.request(Cmd.GET_DEFAULT_BALANCE, [saved ? 1 : 0]))[0];
+    return atLeast(await this.request(Cmd.GET_DEFAULT_BALANCE, [saved ? 1 : 0]), 1)[0];
   }
 
   async setDefaultBalance(balance) {
@@ -177,7 +193,7 @@ export class A50 {
   }
 
   async getAlertVolume(saved = false) {
-    const value = (await this.request(Cmd.GET_ALERT_VOLUME, [saved ? 1 : 0]))[0];
+    const value = atLeast(await this.request(Cmd.GET_ALERT_VOLUME, [saved ? 1 : 0]), 1)[0];
     checkPercent(value, 'alert volume');
     return value;
   }

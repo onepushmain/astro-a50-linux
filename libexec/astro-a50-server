@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Serves the A50 Control page on 127.0.0.1 for bin/astro-a50.
+
+Unlike `python -m http.server` it sends no-store (so an upgrade never mixes
+old and new files), refuses requests whose Host is not this server (DNS
+rebinding), and lists no directories.
+"""
+
+import argparse
+import functools
+import http.server
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    allowed_hosts = frozenset()
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
+    def send_head(self):
+        if self.headers.get("Host", "") not in self.allowed_hosts:
+            self.send_error(403)
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        self.send_error(404)
+        return None
+
+    def log_message(self, format, *args):
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--dir", required=True)
+    args = parser.parse_args()
+    Handler.allowed_hosts = frozenset({f"127.0.0.1:{args.port}", f"localhost:{args.port}"})
+    handler = functools.partial(Handler, directory=args.dir)
+    with http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler) as server:
+        server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

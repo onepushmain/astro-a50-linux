@@ -13,10 +13,12 @@ import os
 import pathlib
 import select
 import sys
+import time
 
 VENDOR, PRODUCT = 0x9886, 0x002C
 REPORT_ID = 0x02
 REPORT = 64  # report ID + 63 bytes
+CONTROL_PAGE = bytes([0x06, 0x32, 0xFF])  # "Usage Page (0xFF32)" in the report descriptor
 TIMEOUT = 3.0
 READ_ONLY = {0x7C: "battery", 0x54: "headset status", 0x6C: "active EQ slot", 0x6E: "EQ slot name"}
 ICON, CHARGING = "󰋋", "󱐋"
@@ -42,9 +44,11 @@ def find_hidraw(sysfs="/sys"):
     for node in sorted(base.iterdir()):
         try:
             uevent = (node / "device" / "uevent").read_text()
+            descriptor = (node / "device" / "report_descriptor").read_bytes()
         except OSError:
             continue
-        if want in uevent.upper().splitlines():
+        # The A50 shows several HID interfaces; only the vendor one takes requests.
+        if want in uevent.upper().splitlines() and CONTROL_PAGE in descriptor:
             return f"/dev/{node.name}"
     return None
 
@@ -103,6 +107,7 @@ STATES = {
     "off": ("off", "A50 headset is off"),
     "no-access": ("!", "Can't open the A50: install the astro-a50 udev rule and re-plug the base station"),
     "error": ("?", "The A50 base station did not answer"),
+    "busy": ("…", "Another program is using the A50 right now"),
 }
 
 
@@ -139,15 +144,19 @@ def app_running(run_dir):
     return True
 
 
+def cached_while_open(run_dir):
+    try:
+        out = json.loads(pathlib.Path(run_dir, "last.json").read_text())
+    except (OSError, ValueError):
+        return {"text": f"{ICON}", "tooltip": "A50 Control is open", "class": ["app-open"]}
+    out["tooltip"] = out.get("tooltip", "") + "\n(A50 Control is open)"
+    return out
+
+
 def collect(run_dir):
     cache = pathlib.Path(run_dir, "last.json")
     if app_running(run_dir):
-        try:
-            out = json.loads(cache.read_text())
-        except (OSError, ValueError):
-            return {"text": f"{ICON}", "tooltip": "A50 Control is open", "class": ["app-open"]}
-        out["tooltip"] = out.get("tooltip", "") + "\n(A50 Control is open)"
-        return out
+        return cached_while_open(run_dir)
     path = find_hidraw()
     if path is None:
         return waybar(None, "disconnected")
@@ -172,13 +181,31 @@ def collect(run_dir):
     return out
 
 
+def run(run_dir, wait=5.0):
+    """Takes the device lock, then reads. The app's launcher holds the same lock
+    while its window is open; waybar starts one copy of this per bar."""
+    with open(pathlib.Path(run_dir, "status.lock"), "w") as lock:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if app_running(run_dir):
+                    return cached_while_open(run_dir)
+                if time.monotonic() > deadline:
+                    return waybar(None, "busy")
+                time.sleep(0.05)
+        return collect(run_dir)
+
+
 def main():
     run_dir = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "astro-a50")
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # Waybar starts one copy per bar; only one may talk to the device at a time.
-    with open(run_dir / "status.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        print(dumps(collect(run_dir)), flush=True)
+    if run_dir.stat().st_uid != os.getuid():  # /tmp fallback taken by someone else
+        print(dumps(waybar(None, "error")), flush=True)
+        return 1
+    print(dumps(run(run_dir)), flush=True)
     return 0
 
 
