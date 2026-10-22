@@ -84,9 +84,10 @@ export class Controller {
     }
     // Only one window may talk to the device: replies carry no request id,
     // so two talkers would read each other's replies.
-    if (this.locks && !(await this.takeLock())) {
+    if (this.locks && !(await this.takeLock(true))) {
       this.state.screen = 'other-window';
-      return this.draw();
+      this.draw();
+      await this.takeLock(false); // take over when the other window closes
     }
     this.listen();
     this.state.screen = 'connect';
@@ -95,9 +96,9 @@ export class Controller {
     if (known) await this.openDevice(known);
   }
 
-  takeLock() {
+  takeLock(ifAvailable) {
     return new Promise((resolve) => {
-      Promise.resolve(this.locks.request(DEVICE_LOCK, { ifAvailable: true }, (lock) => {
+      Promise.resolve(this.locks.request(DEVICE_LOCK, { ifAvailable }, (lock) => {
         resolve(Boolean(lock));
         // Held for the life of the page.
         return lock ? new Promise(() => {}) : undefined;
@@ -280,8 +281,16 @@ export class Controller {
     gate({ value }) { return this.state.session.setNoiseGate(value); },
     'mic-eq'({ value }) { return this.state.session.setMicEq(value); },
     async 'revert-close'() {
-      await this.state.session.clearChanges();
+      const s = this.state.session;
+      await s.clearChanges();
+      await s.ops; // edits made while reverting
+      if (s.changeCount()) {
+        this.show('Something changed while reverting, so the window stayed open. Check it and try again.', 'error');
+        return;
+      }
       this.closeWindow();
+      // Only seen when the window refused to close.
+      this.show('Reverted to the saved settings. You can close this window now.');
     },
     'lib-pick'({ value }) { this.state.view.lib = value; this.draw(); },
     'lib-remove'({ value }) {

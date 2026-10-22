@@ -1,5 +1,6 @@
-// Loads the real page in headless Chromium in ?demo mode (fake headset) and
-// checks what it rendered. Skipped when Chromium is not installed.
+// Loads the real page in headless Chromium over the DevTools protocol, in
+// ?demo mode (fake headset) or without a device. Skipped when Chromium is
+// not installed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -12,7 +13,9 @@ import { fileURLToPath } from 'node:url';
 const APP = fileURLToPath(new URL('../app/', import.meta.url));
 const BROWSER = process.env.CHROMIUM || 'chromium';
 const hasBrowser = spawnSync(BROWSER, ['--version']).status === 0;
+const skip = !hasBrowser && 'chromium not installed';
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function serve() {
   const server = createServer(async (req, res) => {
@@ -28,23 +31,27 @@ function serve() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
-// Opens url in headless Chromium and polls #app over the DevTools protocol
-// until check(html) passes. (A one-shot --dump-dom can snapshot the page
-// before async browser calls such as navigator.locks have answered.)
-async function waitForApp(url, check, timeoutMs = 20000) {
+// Opens a page and returns helpers that drive it like a user would. (A
+// one-shot --dump-dom can snapshot before async browser calls answer.)
+async function openPage(path) {
+  const server = await serve();
   const profile = await mkdtemp(join(tmpdir(), 'a50-ui-'));
   const child = spawn(BROWSER, ['--headless=new', '--disable-gpu', '--no-first-run', `--user-data-dir=${profile}`,
-    '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
-  let html = '';
+    '--window-size=1400,1000', '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
+  const close = async () => {
+    child.kill('SIGKILL');
+    await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once('exit', resolve)));
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    server.close();
+  };
   try {
-    const end = Date.now() + timeoutMs;
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     let port;
-    while (!port) {
-      if (Date.now() > end) throw new Error('Chromium did not start');
+    for (let i = 0; !port; i++) {
+      if (i > 400) throw new Error('Chromium did not start');
       port = await readFile(join(profile, 'DevToolsActivePort'), 'utf8').then((t) => t.split('\n')[0]).catch(() => null);
       if (!port) await sleep(50);
     }
+    const url = `http://127.0.0.1:${server.address().port}${path}`;
     const target = await (await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' })).json();
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
@@ -55,45 +62,90 @@ async function waitForApp(url, check, timeoutMs = 20000) {
       pending.get(msg.id)?.(msg);
       pending.delete(msg.id);
     };
-    const evaluate = (expression) => new Promise((resolve) => {
+    const send = (method, params = {}) => new Promise((resolve) => {
       id += 1;
-      pending.set(id, (msg) => resolve(msg.result?.result?.value));
-      ws.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression } }));
+      pending.set(id, resolve);
+      ws.send(JSON.stringify({ id, method, params }));
     });
-    while (Date.now() < end) {
-      html = (await evaluate("document.getElementById('app')?.innerHTML ?? ''")) ?? '';
-      if (check(html)) break;
-      await sleep(100);
-    }
-    ws.close();
-    return html;
-  } finally {
-    child.kill('SIGKILL');
-    await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once('exit', resolve)));
-    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    const evaluate = async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true })).result?.result?.value;
+    const waitFor = async (expression, timeoutMs = 20000) => {
+      const end = Date.now() + timeoutMs;
+      while (Date.now() < end) {
+        if (await evaluate(expression)) return true;
+        await sleep(50);
+      }
+      throw new Error(`timed out waiting for ${expression}`);
+    };
+    // A real press and release, a human-like 120 ms apart.
+    const click = async (elementId) => {
+      const { x, y } = await evaluate(`(() => { const el = document.getElementById(${JSON.stringify(elementId)});
+        el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+      const base = { x, y, button: 'left', clickCount: 1 };
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
+      await sleep(120);
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
+    };
+    const html = () => evaluate('document.body.innerHTML');
+    return { evaluate, waitFor, click, send, html, close: async () => { ws.close(); await close(); } };
+  } catch (e) {
+    await close();
+    throw e;
   }
 }
 
-test('the demo page renders the fake headset', { skip: !hasBrowser && 'chromium not installed', timeout: 60000 }, async () => {
-  const server = await serve();
+test('the demo page renders the fake headset', { skip, timeout: 60000 }, async () => {
+  const page = await openPage('/?demo');
   try {
-    const dom = await waitForApp(`http://127.0.0.1:${server.address().port}/?demo`, (h) => h.includes('data-input="gain"'));
+    await page.waitFor("!!document.querySelector('[data-input=\"gain\"]')");
+    const dom = await page.html();
     assert.match(dom, /DEMO · fake headset/);
     assert.match(dom, /<b>88%<\/b>/);
     assert.match(dom, />ASTRO\+</);
     assert.match(dom, /BASE STATION FW 35155\.43/);
-    assert.match(dom, /data-input="gain"/);
   } finally {
-    server.close();
+    await page.close();
   }
 });
 
-test('without WebHID permission the page asks to connect', { skip: !hasBrowser && 'chromium not installed', timeout: 60000 }, async () => {
-  const server = await serve();
+test('without WebHID permission the page asks to connect', { skip, timeout: 60000 }, async () => {
+  const page = await openPage('/');
   try {
-    const dom = await waitForApp(`http://127.0.0.1:${server.address().port}/`, (h) => h.includes('data-action="connect"'));
-    assert.match(dom, /data-action="connect"/);
+    await page.waitFor("!!document.querySelector('[data-action=\"connect\"]')");
   } finally {
-    server.close();
+    await page.close();
+  }
+});
+
+test('the first click after typing in a field is not lost', { skip, timeout: 60000 }, async () => {
+  const page = await openPage('/?demo');
+  try {
+    await page.waitFor("!!document.getElementById('advanced-toggle')");
+    await page.click('advanced-toggle');
+    await page.waitFor("!!document.getElementById('freq-2')");
+    await page.click('freq-2');
+    await page.evaluate("document.getElementById('freq-2').select()");
+    await page.send('Input.insertText', { text: '500' });
+    await page.click('lib-add-editor');
+    await page.waitFor("!!document.getElementById('lib-pick-0')", 5000);
+    await page.waitFor("document.getElementById('freq-2').value === '500'", 5000);
+  } finally {
+    await page.close();
+  }
+});
+
+test('a banner survives re-renders without being re-inserted', { skip, timeout: 60000 }, async () => {
+  const page = await openPage('/?demo');
+  try {
+    await page.waitFor("!!document.getElementById('lib-add-editor')");
+    await page.click('lib-add-editor');
+    await page.waitFor("!!document.querySelector('#banner .banner')");
+    await page.evaluate("window.firstBanner = document.querySelector('#banner .banner')");
+    await page.click('tab-mic');
+    await page.waitFor("document.getElementById('tab-mic').getAttribute('aria-selected') === 'true'");
+    assert.equal(await page.evaluate("document.querySelector('#banner .banner') === window.firstBanner"), true);
+  } finally {
+    await page.close();
   }
 });

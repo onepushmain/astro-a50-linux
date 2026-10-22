@@ -39,8 +39,9 @@ test('a second window does not talk to the device', async () => {
   await first.c.init();
   const before = device.a50.log.length;
   const second = make({ device, locks });
-  await second.c.init();
-  assert.equal(second.c.state.screen, 'other-window');
+  second.c.init(); // waits for the lock while the first window is open
+  await until(() => second.c.state.screen === 'other-window');
+  await tick(20);
   assert.equal(device.a50.log.length, before);
 });
 
@@ -150,4 +151,37 @@ test('the library saves the selected slot and loads it into another', async () =
   await c.act('lib-load');
   assert.deepEqual(device.a50.active.gains[2], [2, 0, 0, 5, 7]);
   assert.equal(c.importLibrary('not json'), 0);
+});
+
+test('the second window takes over once the first one closes', async () => {
+  const locks = new FakeLocks();
+  const device = new FakeHIDDevice();
+  const first = make({ device, locks });
+  await first.c.init();
+  const second = make({ device, locks });
+  const booting = second.c.init();
+  await until(() => second.c.state.screen === 'other-window');
+  first.c.stopSession();
+  locks.release('astro-a50-device');
+  await booting;
+  assert.equal(second.c.state.screen, 'main');
+});
+
+test('when the window refuses to close, revert and close says so', async () => {
+  const { c } = make();
+  await c.init();
+  await c.commit('gain', -7, { band: 0 });
+  await c.act('revert-close');
+  assert.match(c.state.banner.text, /close this window/i);
+});
+
+test('a commit queued behind revert and close keeps the window open', async () => {
+  const { c, closed } = make();
+  await c.init();
+  await c.commit('gain', -7, { band: 0 });
+  const closing = c.act('revert-close');
+  const late = c.commit('slider', 99, { slider: 5 });
+  await Promise.all([closing, late]);
+  assert.equal(closed.length, 0);
+  assert.match(c.state.banner.text, /changed while/i);
 });

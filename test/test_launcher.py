@@ -143,6 +143,35 @@ class LauncherTests(unittest.TestCase):
             stale.kill()
             stale.wait()
 
+    def test_a_second_launch_while_the_first_is_starting_hands_off_to_it(self):
+        first_marker = self.dir / "first-started"
+        self.write_browser(f"""
+            import pathlib, sys, time, urllib.request
+            out = pathlib.Path({str(self.dir)!r})
+            url = next(a for a in sys.argv if a.startswith("--app=")).split("=", 1)[1]
+            if not out.joinpath("first-started").exists():
+                out.joinpath("first-started").write_text("1")
+                time.sleep(1.5)
+                (out / "page-first").write_bytes(urllib.request.urlopen(url, timeout=5).read())
+            else:
+                (out / "second-args").write_text("\\n".join(sys.argv[1:]))
+            """)
+        env = dict(os.environ, ASTRO_A50_BROWSER=str(self.browser), ASTRO_A50_PORT=str(self.port),
+                   XDG_RUNTIME_DIR=str(self.run_dir), XDG_DATA_HOME=str(self.dir / "data"))
+        first = subprocess.Popen([str(LAUNCHER)], env=env, stderr=subprocess.PIPE, text=True)
+        server_pid = self.run_dir / "astro-a50" / "server.pid"
+        for _ in range(200):
+            if server_pid.exists():
+                break
+            time.sleep(0.005)
+        second = subprocess.run([str(LAUNCHER)], env=env, capture_output=True, text=True, timeout=30)
+        first_err = first.communicate(timeout=30)[1]
+        self.assertEqual(first.returncode, 0, first_err)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertTrue(first_marker.exists())
+        self.assertIn(b"A50 Control", (self.dir / "page-first").read_bytes())
+        self.assertTrue((self.dir / "second-args").exists())
+
 
 class ServerTests(unittest.TestCase):
     def setUp(self):

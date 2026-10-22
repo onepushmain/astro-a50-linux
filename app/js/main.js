@@ -2,9 +2,10 @@
 // Controller calls. Behaviour lives in controller.js.
 
 import { Controller } from './controller.js';
-import { render } from './ui.js';
+import { render, renderBanner } from './ui.js';
 
 const root = document.getElementById('app');
+const bannerRoot = document.getElementById('banner');
 
 let storage;
 try {
@@ -15,25 +16,39 @@ try {
   storage = { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, v) };
 }
 
-let dragging = false;
+let pointerDown = false;
 let renderQueued = false;
+let bannerHtml = '';
 
-// Re-rendering replaces every control, so it waits while a slider is held
-// or a text field is being typed in.
-function editing() {
-  const el = document.activeElement;
-  return el?.tagName === 'INPUT' && (el.type === 'text' || el.type === 'number' || !el.type);
-}
+const isTextField = (el) => el?.tagName === 'INPUT' && el.type !== 'range';
 
+// Re-rendering replaces every control. It waits while a mouse button or
+// finger is down, so a drag or a click (press, release) always ends on the
+// element it started on. A text field being typed in keeps its text and
+// caret across a re-render.
 function draw() {
-  if (dragging || editing()) {
+  if (pointerDown) {
     renderQueued = true;
     return;
   }
   renderQueued = false;
-  const focusId = root.contains(document.activeElement) ? document.activeElement.id : null;
+  const banner = renderBanner(controller.state);
+  if (banner !== bannerHtml) {
+    bannerRoot.innerHTML = banner;
+    bannerHtml = banner;
+  }
+  const active = document.activeElement;
+  const focusId = root.contains(active) ? active.id : null;
+  const typing = isTextField(active) && root.contains(active)
+    ? { value: active.value, start: active.selectionStart, end: active.selectionEnd } : null;
   root.innerHTML = render(controller.state);
-  if (focusId) document.getElementById(focusId)?.focus();
+  const el = focusId ? document.getElementById(focusId) : null;
+  if (!el) return;
+  if (typing && isTextField(el)) {
+    el.value = typing.value;
+    try { el.setSelectionRange(typing.start, typing.end); } catch { /* number fields have no caret API */ }
+  }
+  el.focus();
 }
 
 function flush() {
@@ -67,9 +82,9 @@ function importLibrary() {
   input.click();
 }
 
-root.addEventListener('click', (e) => {
+function onClick(e) {
   const el = e.target.closest('[data-action]');
-  if (!el || el.disabled) return;
+  if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return;
   const action = el.dataset.action;
   if (action === 'lib-export') return exportLibrary();
   if (action === 'lib-import') return importLibrary();
@@ -79,7 +94,9 @@ root.addEventListener('click', (e) => {
     slot: el.dataset.slot ? Number(el.dataset.slot) : undefined,
   });
   return undefined;
-});
+}
+root.addEventListener('click', onClick);
+bannerRoot.addEventListener('click', onClick);
 
 // While dragging, only the number next to the control updates.
 root.addEventListener('input', (e) => {
@@ -100,8 +117,6 @@ root.addEventListener('change', (e) => {
   controller.commit(kind, value, { band: Number(el.dataset.band), slider: Number(el.dataset.value) });
 });
 
-root.addEventListener('focusout', () => setTimeout(() => { if (!editing()) flush(); }, 0));
-
 // Arrow keys move between tabs, as in any tab list.
 root.addEventListener('keydown', (e) => {
   const tab = e.target.closest('[role="tab"]');
@@ -114,13 +129,13 @@ root.addEventListener('keydown', (e) => {
   controller.act('tab', { value: target.dataset.value }).then(() => document.getElementById(target.id)?.focus());
 });
 
-document.addEventListener('pointerdown', (e) => { if (e.target.type === 'range') dragging = true; });
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
 for (const type of ['pointerup', 'pointercancel']) {
+  // The click event follows pointerup in the same task; flush() waits a tick.
   document.addEventListener(type, () => {
-    if (!dragging) return;
-    dragging = false;
+    pointerDown = false;
     flush();
-  });
+  }, true);
 }
 
 window.addEventListener('beforeunload', (e) => {

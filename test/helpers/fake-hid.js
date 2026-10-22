@@ -49,19 +49,34 @@ export class FakeHID {
   emit(type, device) { this.handlers[type].forEach((cb) => cb({ device })); }
 }
 
-// navigator.locks for several "windows" sharing one origin.
+// navigator.locks for several "windows" sharing one origin. release(name)
+// plays the window holding the lock being closed.
 export class FakeLocks {
-  constructor() { this.held = new Set(); }
+  constructor() {
+    this.held = new Set();
+    this.waiters = new Map();
+  }
 
-  async request(name, opts, cb) {
+  request(name, opts, cb) {
     if (this.held.has(name)) {
-      if (opts.ifAvailable) return cb(null);
-      throw new Error('FakeLocks only supports ifAvailable');
+      if (opts.ifAvailable) return Promise.resolve(cb(null));
+      return new Promise((resolve) => {
+        const queue = this.waiters.get(name) ?? [];
+        queue.push(() => resolve(this.grant(name, cb)));
+        this.waiters.set(name, queue);
+      });
     }
+    return Promise.resolve(this.grant(name, cb));
+  }
+
+  grant(name, cb) {
     this.held.add(name);
-    const done = cb({ name });
-    Promise.resolve(done).finally(() => this.held.delete(name));
-    return undefined;
+    return cb({ name });
+  }
+
+  release(name) {
+    this.held.delete(name);
+    this.waiters.get(name)?.shift()?.();
   }
 }
 
