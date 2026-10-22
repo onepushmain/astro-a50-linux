@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Opens A50 Control: serves the app on 127.0.0.1 and shows it in a Chromium
+# app window with its own profile (so the WebHID permission is remembered and
+# kept apart from your normal browsing). The server stops when the window closes.
+#
+# Environment: ASTRO_A50_BROWSER (default chromium), ASTRO_A50_PORT (47850),
+# ASTRO_A50_SHARE (directory with index.html).
+set -euo pipefail
+
+here=$(dirname "$(readlink -f "$0")")
+share=${ASTRO_A50_SHARE:-}
+if [[ -z $share ]]; then
+  for d in "$here/../share/astro-a50/app" "$here/../app"; do
+    if [[ -f $d/index.html ]]; then share=$(readlink -f "$d"); break; fi
+  done
+fi
+if [[ -z $share ]]; then
+  echo "astro-a50: app files not found" >&2
+  exit 1
+fi
+
+port=${ASTRO_A50_PORT:-47850}
+browser=${ASTRO_A50_BROWSER:-chromium}
+run_dir=${XDG_RUNTIME_DIR:-/tmp}/astro-a50
+profile=${XDG_DATA_HOME:-$HOME/.local/share}/astro-a50/profile
+pid_file=$run_dir/app.pid
+url="http://127.0.0.1:$port/"
+browser_args=(--user-data-dir="$profile" --app="$url" --class=astro-a50
+  --no-first-run --no-default-browser-check --ozone-platform-hint=auto)
+
+mkdir -p -m 700 "$run_dir"
+mkdir -p "$profile"
+
+# Already open: Chromium hands the new window to the running instance.
+if [[ -f $pid_file ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+  exec "$browser" "${browser_args[@]}"
+fi
+
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; }
+
+if port_open; then
+  echo "astro-a50: port $port is in use by another program; pick another with ASTRO_A50_PORT" >&2
+  exit 1
+fi
+
+python3 -I -m http.server --bind 127.0.0.1 --directory "$share" "$port" >/dev/null 2>&1 &
+server=$!
+cleanup() {
+  kill "$server" 2>/dev/null || true
+  wait "$server" 2>/dev/null || true
+  rm -f "$pid_file"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+for _ in $(seq 50); do
+  port_open && break
+  if ! kill -0 "$server" 2>/dev/null; then
+    echo "astro-a50: could not start the local server" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+
+echo $$ > "$pid_file"
+"$browser" "${browser_args[@]}"

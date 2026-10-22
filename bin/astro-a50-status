@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Waybar module for the Astro A50 gen 4: battery, charging and active EQ slot.
+
+Prints one line of waybar JSON and exits; run it from waybar with an interval.
+It only sends read requests. While the A50 Control window is open it does not
+touch the device (two programs talking at once would mix up replies) and
+shows the last value it read instead.
+"""
+
+import fcntl
+import json
+import os
+import pathlib
+import select
+import sys
+
+VENDOR, PRODUCT = 0x9886, 0x002C
+REPORT_ID = 0x02
+REPORT = 64  # report ID + 63 bytes
+TIMEOUT = 3.0
+READ_ONLY = {0x7C: "battery", 0x54: "headset status", 0x6C: "active EQ slot", 0x6E: "EQ slot name"}
+ICON, CHARGING = "󰋋", "󱐋"
+
+
+class RequestFailed(Exception):
+    pass
+
+
+class HeadsetOff(RequestFailed):
+    pass
+
+
+class ProtocolError(Exception):
+    pass
+
+
+def find_hidraw(sysfs="/sys"):
+    want = f"HID_ID=0003:{VENDOR:08X}:{PRODUCT:08X}"
+    base = pathlib.Path(sysfs, "class", "hidraw")
+    if not base.is_dir():
+        return None
+    for node in sorted(base.iterdir()):
+        try:
+            uevent = (node / "device" / "uevent").read_text()
+        except OSError:
+            continue
+        if want in uevent.upper().splitlines():
+            return f"/dev/{node.name}"
+    return None
+
+
+def _drain(fd):
+    while select.select([fd], [], [], 0)[0]:
+        if not os.read(fd, REPORT):
+            return
+
+
+def query(fd, request_type, payload=(), timeout=TIMEOUT):
+    if request_type not in READ_ONLY:
+        raise ValueError(f"0x{request_type:02x} is not a read request this helper may send")
+    payload = list(payload)
+    msg = [REPORT_ID, request_type] + ([len(payload), *payload] if payload else [])
+    _drain(fd)
+    os.write(fd, bytes(msg).ljust(REPORT, b"\0"))
+    if not select.select([fd], [], [], timeout)[0]:
+        raise TimeoutError("base station did not answer")
+    resp = os.read(fd, REPORT)
+    if len(resp) < 3 or resp[0] != REPORT_ID:
+        raise ProtocolError("unexpected report")
+    status, length = resp[1], min(resp[2], len(resp) - 3)
+    data = resp[3:3 + length]
+    if status == 1:
+        message = data[4:].split(b"\0", 1)[0].decode(errors="replace")
+        if message == "HID_ERROR_SLAVE_NO_SLAVE":
+            raise HeadsetOff(message)
+        raise RequestFailed(message)
+    if status not in (0, 2):
+        raise ProtocolError(f"unexpected status {status}")
+    return data
+
+
+def read_status(fd):
+    battery = query(fd, 0x7C)
+    headset = query(fd, 0x54)
+    slot = query(fd, 0x6C)
+    if not (battery and headset and slot) or slot[0] not in (1, 2, 3):
+        raise ProtocolError("short reply")
+    name = query(fd, 0x6E, [slot[0], 0])
+    if len(name) < 2 or name[0] != 0x6E or name[1] != slot[0]:
+        raise ProtocolError("bad name reply")
+    return {
+        "percent": battery[0] & 0x7F,
+        "charging": bool(battery[0] & 0x80),
+        "on": bool(headset[0] & 0x02),
+        "docked": bool(headset[0] & 0x01),
+        "slot": slot[0],
+        "name": name[2:].split(b"\0", 1)[0].decode("ascii", errors="replace"),
+    }
+
+
+STATES = {
+    "disconnected": ("—", "A50 base station not connected"),
+    "off": ("off", "A50 headset is off"),
+    "no-access": ("!", "Can't open the A50: install the astro-a50 udev rule and re-plug the base station"),
+    "error": ("?", "The A50 base station did not answer"),
+}
+
+
+def waybar(status, state=None):
+    if status is None:
+        short, tooltip = STATES[state]
+        return {"text": f"{ICON} {short}", "tooltip": tooltip, "class": [state]}
+    classes = []
+    if status["charging"]:
+        classes.append("charging")
+    if status["percent"] <= 15:
+        classes.append("low")
+    power = "on" if status["on"] else "off"
+    dock = "docked" if status["docked"] else "not docked"
+    return {
+        "text": f"{ICON} {status['percent']}%" + (f" {CHARGING}" if status["charging"] else ""),
+        "tooltip": (f"A50 battery {status['percent']}%{', charging' if status['charging'] else ''}\n"
+                    f"Headset {power}, {dock}\nEQ {status['slot']}: {status['name']}"),
+        "class": classes,
+        "percentage": status["percent"],
+    }
+
+
+def dumps(out):
+    return json.dumps(out, ensure_ascii=False)
+
+
+def app_running(run_dir):
+    try:
+        pid = int(pathlib.Path(run_dir, "app.pid").read_text().strip())
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def collect(run_dir):
+    cache = pathlib.Path(run_dir, "last.json")
+    if app_running(run_dir):
+        try:
+            out = json.loads(cache.read_text())
+        except (OSError, ValueError):
+            return {"text": f"{ICON}", "tooltip": "A50 Control is open", "class": ["app-open"]}
+        out["tooltip"] = out.get("tooltip", "") + "\n(A50 Control is open)"
+        return out
+    path = find_hidraw()
+    if path is None:
+        return waybar(None, "disconnected")
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except PermissionError:
+        return waybar(None, "no-access")
+    except OSError:
+        return waybar(None, "disconnected")
+    try:
+        out = waybar(read_status(fd))
+    except HeadsetOff:
+        out = waybar(None, "off")
+    except (TimeoutError, RequestFailed, ProtocolError, OSError):
+        out = waybar(None, "error")
+    finally:
+        os.close(fd)
+    try:
+        cache.write_text(dumps(out))
+    except OSError:
+        pass
+    return out
+
+
+def main():
+    run_dir = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "astro-a50")
+    run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Waybar starts one copy per bar; only one may talk to the device at a time.
+    with open(run_dir / "status.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        print(dumps(collect(run_dir)), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,5 @@
+# Astro A50 gen 4 base station (9886:002c): give the logged-in user access to
+# its HID control interface, so A50 Control and astro-a50-status run without
+# root. Only the hidraw node is opened up, not the raw USB device.
+# The file name must sort before systemd's 71-seat.rules for uaccess to apply.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="9886", ATTRS{idProduct}=="002c", TAG+="uaccess"

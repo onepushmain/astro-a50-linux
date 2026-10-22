@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=A50 Control
+GenericName=Headset Settings
+Comment=Equalizer, microphone, sidetone and battery for the Astro A50 headset
+Exec=astro-a50
+Icon=astro-a50
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=astro;a50;headset;equalizer;eq;sidetone;
+StartupWMClass=astro-a50

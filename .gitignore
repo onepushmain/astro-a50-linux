@@ -1,0 +1,6 @@
+/dist/
+node_modules/
+/pkg/
+*.pkg.tar.*
+__pycache__/
+/src/
